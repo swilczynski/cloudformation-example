@@ -5,23 +5,126 @@ Parameters:
     Description: An environment name that will be prefixed to resource names
     Type: String
     Default: webapp-demo-prod-201910030831
+
+  MinClusterSize:
+    Description: Minimum number of instances in the Cluster
+    Type: String
+    Default: 1
+
+  MaxClusterSize:
+    Description: Maximum number of instances in the Cluster
+    Type: String
+    Default: 2
+
+  DesiredClusterSize:
+    Description: Desired number of instances in the Cluster
+    Type: String
+    Default: 1
+
   KeyName:
     Description: EC2 Key Pair to allow SSH access to the instances
     Type: AWS::EC2::KeyPair::KeyName
+
   VPC:
     Description: VPC to launch stack in
     Type: AWS::EC2::VPC::Id
+
   PublicSubnets:
     Description: Public Subnets for Load Balancer and Bastion Host
     Type: List<AWS::EC2::Subnet::Id>
+
   PrivateSubnets:
     Description: Private Subnets for Instances
     Type: List<AWS::EC2::Subnet::Id>
+
   SecurityGroups:
     Description: Security Group for Instances
     Type: List<AWS::EC2::SecurityGroup::Id>
 
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment"
+        Parameters:
+          - EnvironmentName
+      - Label:
+          default: "Autoscaling Configuration"
+        Parameters:
+          - MinClusterSize
+          - MaxClusterSize
+          - DesiredClusterSize
+      - Label:
+          default: "SSH Configuration"
+        Parameters:
+          - KeyName
+      - Label:
+          default: "VPC Configuration"
+        Parameters:
+          - VPC
+          - PublicSubnets
+          - PrivateSubnets
+          - SecurityGroups
+
 Resources:
+  ServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub CodeDeploy-${EnvironmentName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "codedeploy.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: !Sub CodeDeploy-${EnvironmentName}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "autoscaling:*"
+                  - "ec2:*"
+                  - "elasticloadbalancing:*"
+                  - "iam:PassRole"
+                Resource:
+                  - "*"
+
+  Ec2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub Ec2-${EnvironmentName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: !Sub Ec2-${EnvironmentName}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "s3:*"
+                Resource:
+                  - "*"
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref Ec2Role
+
   BastionServerInstance:
     Type: AWS::EC2::Instance
     Properties:
@@ -33,6 +136,7 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub bastion-${EnvironmentName}
+
   LaunchConfiguration:
     Type: AWS::AutoScaling::LaunchConfiguration
     Properties:
@@ -40,6 +144,7 @@ Resources:
       KeyName: !Ref KeyName
       InstanceType: t2.micro
       SecurityGroups: !Ref SecurityGroups
+      IamInstanceProfile: !Ref InstanceProfile
       UserData:
         Fn::Base64:
           Fn::Sub: |
@@ -51,10 +156,12 @@ Resources:
             amazon-linux-extras enable php7.3
             yum install php-xml -y
             yum install php-mcrypt -y
+            yum install ruby -y
             service httpd start
             service php-fpm restart
             echo 'OK' > /var/www/html/hc.html
             echo 'Hello' > /var/www/html/index.html
+
   TargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
@@ -73,20 +180,23 @@ Resources:
       TargetGroupAttributes:
         - Key: deregistration_delay.timeout_seconds
           Value: 60
+
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
       VPCZoneIdentifier: !Ref PrivateSubnets
       LaunchConfigurationName: !Ref LaunchConfiguration
       Cooldown: 10
-      MaxSize: "2"
-      MinSize: "1"
+      MaxSize: !Ref MaxClusterSize
+      MinSize: !Ref MinClusterSize
+      DesiredCapacity: !Ref DesiredClusterSize
       TargetGroupARNs:
         - !Ref TargetGroup
       Tags:
         - Key: Name
           PropagateAtLaunch: true
           Value: !Sub ${EnvironmentName}
+
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
@@ -96,6 +206,7 @@ Resources:
       Tags:
         - Key: Name
           Value: !Ref EnvironmentName
+
   LoadBalancerListenerHttp:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
@@ -105,6 +216,7 @@ Resources:
       DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref TargetGroup
+
 Outputs:
   Endpoint:
     Description: Endpoint Url
