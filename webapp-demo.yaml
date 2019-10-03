@@ -1,0 +1,111 @@
+Description: Application for Norcloud Demo
+
+Parameters:
+  EnvironmentName:
+    Description: An environment name that will be prefixed to resource names
+    Type: String
+    Default: webapp-demo-prod-201910030831
+  KeyName:
+    Description: EC2 Key Pair to allow SSH access to the instances
+    Type: AWS::EC2::KeyPair::KeyName
+  VPC:
+    Description: VPC to launch stack in
+    Type: AWS::EC2::VPC::Id
+  PublicSubnets:
+    Description: Public Subnets for Load Balancer and Bastion Host
+    Type: List<AWS::EC2::Subnet::Id>
+  PrivateSubnets:
+    Description: Private Subnets for Instances
+    Type: List<AWS::EC2::Subnet::Id>
+  SecurityGroups:
+    Description: Security Group for Instances
+    Type: List<AWS::EC2::SecurityGroup::Id>
+
+Resources:
+  BastionServerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0b69ea66ff7391e80
+      KeyName: !Ref KeyName
+      InstanceType: t2.micro
+      SubnetId: !Select [0, !Ref PublicSubnets]
+      SecurityGroupIds: !Ref SecurityGroups
+      Tags:
+        - Key: Name
+          Value: !Sub bastion-${EnvironmentName}
+  LaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: ami-0b69ea66ff7391e80
+      KeyName: !Ref KeyName
+      InstanceType: t2.micro
+      SecurityGroups: !Ref SecurityGroups
+      UserData:
+        Fn::Base64:
+          Fn::Sub: |
+            #! /bin/bash -v
+            yum update -y
+            yum install httpd -y
+            sed -i '/<Directory \/var\/www\/>/,/<\/Directory>/ s/AllowOverride None/AllowOverride all/' /etc/httpd/conf/httpd.conf
+            amazon-linux-extras install php7.3 -y
+            amazon-linux-extras enable php7.3
+            yum install php-xml -y
+            yum install php-mcrypt -y
+            service httpd start
+            service php-fpm restart
+            echo 'OK' > /var/www/html/hc.html
+            echo 'Hello' > /var/www/html/index.html
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Ref EnvironmentName
+      VpcId: !Ref VPC
+      Port: 80
+      Protocol: HTTP
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /hc.html
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      HealthCheckTimeoutSeconds: 2
+      HealthCheckIntervalSeconds: 10
+      Matcher:
+        HttpCode: 200
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref PrivateSubnets
+      LaunchConfigurationName: !Ref LaunchConfiguration
+      Cooldown: 10
+      MaxSize: "2"
+      MinSize: "1"
+      TargetGroupARNs:
+        - !Ref TargetGroup
+      Tags:
+        - Key: Name
+          PropagateAtLaunch: true
+          Value: !Sub ${EnvironmentName}
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Ref EnvironmentName
+      Subnets: !Ref PublicSubnets
+      SecurityGroups: !Ref SecurityGroups
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+  LoadBalancerListenerHttp:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+Outputs:
+  Endpoint:
+    Description: Endpoint Url
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
