@@ -1,4 +1,4 @@
-Description: VPC For Norcloud Demo
+Description: VPC for the Demo Assignment
 
 Parameters:
   EnvironmentName:

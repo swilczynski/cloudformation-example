@@ -1,4 +1,4 @@
-Description: Application for Norcloud Demo
+Description: Application for the Demo Assignment
 
 Parameters:
   CodeDeployBucket:
