@@ -1,10 +1,9 @@
 Description: Application for Norcloud Demo
 
 Parameters:
-  EnvironmentName:
-    Description: An environment name that will be prefixed to resource names
+  CodeDeployBucket:
+    Description: Bucket to upload Application for CodeDeploy
     Type: String
-    Default: webapp-demo-prod-201910030831
 
   MinClusterSize:
     Description: Minimum number of instances in the Cluster
@@ -41,13 +40,29 @@ Parameters:
     Description: Security Group for Instances
     Type: List<AWS::EC2::SecurityGroup::Id>
 
+  DatabaseHost:
+    Description: Database Host for Application
+    Type: String
+
+  DatabaseUser:
+    Description: Database User for Application
+    Type: String
+
+  DatabasePassword:
+    Description: Database Password for Application
+    Type: String
+
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label:
           default: "Environment"
         Parameters:
-          - EnvironmentName
+          - CodeDeployBucket
+      - Label:
+          default: "Deployment"
+        Parameters:
+          - AWS::StackName
       - Label:
           default: "Autoscaling Configuration"
         Parameters:
@@ -65,12 +80,18 @@ Metadata:
           - PublicSubnets
           - PrivateSubnets
           - SecurityGroups
+      - Label:
+          default: "Application Configuration"
+        Parameters:
+          - DatabaseHost
+          - DatabaseUser
+          - DatabasePassword
 
 Resources:
-  ServiceRole:
+  CodeDeployServiceRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub CodeDeploy-${EnvironmentName}
+      RoleName: !Sub CodeDeploy-${AWS::StackName}
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -81,7 +102,7 @@ Resources:
             Action:
               - "sts:AssumeRole"
       Policies:
-        - PolicyName: !Sub CodeDeploy-${EnvironmentName}
+        - PolicyName: !Sub CodeDeploy-${AWS::StackName}
           PolicyDocument:
             Version: 2012-10-17
             Statement:
@@ -94,10 +115,10 @@ Resources:
                 Resource:
                   - "*"
 
-  Ec2Role:
+  CodeDeployEc2Role:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub Ec2-${EnvironmentName}
+      RoleName: !Sub Ec2-${AWS::StackName}
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -108,7 +129,7 @@ Resources:
             Action:
               - "sts:AssumeRole"
       Policies:
-        - PolicyName: !Sub Ec2-${EnvironmentName}
+        - PolicyName: !Sub Ec2-${AWS::StackName}
           PolicyDocument:
             Version: 2012-10-17
             Statement:
@@ -123,7 +144,7 @@ Resources:
     Properties:
       Path: "/"
       Roles:
-        - !Ref Ec2Role
+        - !Ref CodeDeployEc2Role
 
   BastionServerInstance:
     Type: AWS::EC2::Instance
@@ -135,7 +156,7 @@ Resources:
       SecurityGroupIds: !Ref SecurityGroups
       Tags:
         - Key: Name
-          Value: !Sub bastion-${EnvironmentName}
+          Value: !Sub bastion-${AWS::StackName}
 
   LaunchConfiguration:
     Type: AWS::AutoScaling::LaunchConfiguration
@@ -149,23 +170,43 @@ Resources:
         Fn::Base64:
           Fn::Sub: |
             #! /bin/bash -v
+
+            # Install base packages
             yum update -y
             yum install httpd -y
-            sed -i '/<Directory \/var\/www\/>/,/<\/Directory>/ s/AllowOverride None/AllowOverride all/' /etc/httpd/conf/httpd.conf
             amazon-linux-extras install php7.3 -y
             amazon-linux-extras enable php7.3
             yum install php-xml -y
             yum install php-mcrypt -y
             yum install ruby -y
+
+            # Install CodeDeploy Agent
+            wget https://aws-codedeploy-us-east-1.s3.amazonaws.com/latest/install
+            chmod +x ./install
+            ./install auto
+            rm install
+
+            # Enable mod_rewrite
+            sed -i ':a;N;$!ba;s/AllowOverride None/AllowOverride All/2' /etc/httpd/conf/httpd.conf
+
+            # Set Env Variables
+            cat > /etc/profile.d/load_env.sh << 'EOF'
+            export DB_HOST=${DatabaseHost}
+            export DB_USER=${DatabaseUser}
+            export DB_PASSWORD=${DatabasePassword}
+            EOF
+
+            # Restart Services
             service httpd start
             service php-fpm restart
+
+            # Create HealthCheck file for TargetGroup
             echo 'OK' > /var/www/html/hc.html
-            echo 'Hello' > /var/www/html/index.html
 
   TargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Name: !Ref EnvironmentName
+      Name: !Ref AWS::StackName
       VpcId: !Ref VPC
       Port: 80
       Protocol: HTTP
@@ -195,17 +236,17 @@ Resources:
       Tags:
         - Key: Name
           PropagateAtLaunch: true
-          Value: !Sub ${EnvironmentName}
+          Value: !Sub ${AWS::StackName}
 
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
-      Name: !Ref EnvironmentName
+      Name: !Ref AWS::StackName
       Subnets: !Ref PublicSubnets
       SecurityGroups: !Ref SecurityGroups
       Tags:
         - Key: Name
-          Value: !Ref EnvironmentName
+          Value: !Ref AWS::StackName
 
   LoadBalancerListenerHttp:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -217,7 +258,36 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref TargetGroup
 
+  DeploymentApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Ref AWS::StackName
+      ComputePlatform: Server
+
+  DeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      DeploymentGroupName: !Ref AWS::StackName
+      ApplicationName: !Ref DeploymentApplication
+      ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
+      DeploymentStyle:
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+        DeploymentType: IN_PLACE
+      LoadBalancerInfo:
+        TargetGroupInfoList:
+          - Name: !GetAtt TargetGroup.TargetGroupName
+      AutoScalingGroups:
+        - !Ref AutoScalingGroup
+      Deployment:
+        Description: "First Launch Deployment"
+        IgnoreApplicationStopFailures: true
+        Revision:
+          RevisionType: S3
+          S3Location:
+            Bucket: !Ref CodeDeployBucket
+            BundleType: "zip"
+            Key: "app-latest.zip"
 Outputs:
   Endpoint:
     Description: Endpoint Url
-    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Value: !Join ["", ["http://", !GetAtt ApplicationLoadBalancer.DNSName]]
