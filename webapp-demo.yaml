@@ -44,6 +44,10 @@ Parameters:
     Description: Database Host for Application
     Type: String
 
+  DatabaseDbName:
+    Description: Database Host for Application
+    Type: String
+
   DatabaseUser:
     Description: Database User for Application
     Type: String
@@ -84,6 +88,7 @@ Metadata:
           default: "Application Configuration"
         Parameters:
           - DatabaseHost
+          - DatabaseDbName
           - DatabaseUser
           - DatabasePassword
 
@@ -190,6 +195,13 @@ Resources:
             sed -i ':a;N;$!ba;s/AllowOverride None/AllowOverride All/2' /etc/httpd/conf/httpd.conf
 
             # Set Env Variables
+            cat > /etc/httpd/conf.d/env.conf << 'EOF'
+            SetEnv DB_HOST ${DatabaseHost}
+            SetEnv DB_DBNAME ${DatabaseDbName}
+            SetEnv DB_USER ${DatabaseUser}
+            SetEnv DB_PASSWORD ${DatabasePassword}
+            EOF
+
             cat > /etc/profile.d/load_env.sh << 'EOF'
             export DB_HOST=${DatabaseHost}
             export DB_USER=${DatabaseUser}
