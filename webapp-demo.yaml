@@ -204,6 +204,7 @@ Resources:
 
             cat > /etc/profile.d/load_env.sh << 'EOF'
             export DB_HOST=${DatabaseHost}
+            export DB_DBNAME ${DatabaseDbName}
             export DB_USER=${DatabaseUser}
             export DB_PASSWORD=${DatabasePassword}
             EOF
@@ -233,6 +234,8 @@ Resources:
       TargetGroupAttributes:
         - Key: deregistration_delay.timeout_seconds
           Value: 60
+        - Key: stickiness.enabled
+          Value: true
 
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
@@ -249,6 +252,58 @@ Resources:
         - Key: Name
           PropagateAtLaunch: true
           Value: !Sub ${AWS::StackName}
+
+  ScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      Cooldown: "1"
+      ScalingAdjustment: "1"
+
+  ScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      Cooldown: "1"
+      ScalingAdjustment: "-1"
+
+  CpuAlarmHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      EvaluationPeriods: "1"
+      Statistic: Average
+      Threshold: "80"
+      AlarmDescription: Alarm if CPU too high or metric disappears indicating instance is down
+      Period: "60"
+      AlarmActions:
+        - Ref: ScaleUpPolicy
+      Namespace: AWS/EC2
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value:
+            Ref: !Ref AutoScalingGroup
+      ComparisonOperator: GreaterThanThreshold
+      MetricName: CPUUtilization
+
+  CpuAlarmLow:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      EvaluationPeriods: "1"
+      Statistic: Average
+      Threshold: "40"
+      AlarmDescription: Alarm if CPU too low
+      Period: "60"
+      AlarmActions:
+        - Ref: ScaleDownPolicy
+      Namespace: AWS/EC2
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value:
+            Ref: !Ref AutoScalingGroup
+      ComparisonOperator: LessThanThreshold
+      MetricName: CPUUtilization
 
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
